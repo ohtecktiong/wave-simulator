@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Wave Simulator (Transverse & Longitudinal)</title>
+  <!-- React & ReactDOM UMD -->
+  <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+  <!-- Babel for in-browser JSX transform -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <!-- Tailwind for quick styling -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { -webkit-user-select:none; -ms-user-select:none; user-select:none; }
+  </style>
+</head>
+<body class="bg-gray-50">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    // =============================
+    // Wave Simulator Component
+    // Supports Transverse & Longitudinal modes with highlighting
+    // =============================
+    function WaveSimulator() {
+      // --- State ---
+      const [mode, setMode] = React.useState('transverse'); // 'transverse' | 'longitudinal'
+      const [amplitude, setAmplitude] = React.useState(60);   // px displacement
+      const [wavelength, setWavelength] = React.useState(300); // px per cycle
+      const [frequency, setFrequency] = React.useState(0.5);   // Hz
+      const [particleCount, setParticleCount] = React.useState(48);
+      const [showWaveform, setShowWaveform] = React.useState(true);
+      const [showTrail, setShowTrail] = React.useState(false);
+      const [isPlaying, setIsPlaying] = React.useState(true);
+      const [highlightIndex, setHighlightIndex] = React.useState(Math.floor(48/2));
+
+      const canvasRef = React.useRef(null);
+      const wrapperRef = React.useRef(null);
+
+      // --- Layout ---
+      const [dims, setDims] = React.useState({ w: 900, h: 420, dpr: 1 });
+      React.useEffect(() => {
+        const handleResize = () => {
+          const dpr = window.devicePixelRatio || 1;
+          const w = Math.min(1200, Math.max(560, wrapperRef.current?.clientWidth || 900));
+          const h = Math.min(560, Math.max(320, Math.round(w * 0.46)));
+          setDims({ w, h, dpr });
+        };
+        handleResize();
+        window.addEventListener('resize', handleResize);
+        return () => window.removeEventListener('resize', handleResize);
+      }, []);
+
+      // --- Derived quantities ---
+      const k = React.useMemo(() => (2 * Math.PI) / Math.max(10, wavelength), [wavelength]); // rad/px
+      const omega = React.useMemo(() => 2 * Math.PI * Math.max(0, frequency), [frequency]);  // rad/s
+
+      // --- Particle equilibrium x positions ---
+      const x0s = React.useMemo(() => {
+        const margin = 40;
+        const effectiveW = dims.w - margin * 2;
+        return Array.from({ length: particleCount }, (_, i) => margin + (i/(particleCount-1)) * effectiveW);
+      }, [particleCount, dims.w]);
+
+      // --- Time + trail ---
+      const timeRef = React.useRef({ t0: performance.now()/1000, t: 0 });
+      const rafRef = React.useRef(0);
+      const trailRef = React.useRef([]);
+
+      // Reset time origin when key params change (keeps phases readable)
+      React.useEffect(() => { timeRef.current.t0 = performance.now()/1000; }, [amplitude, wavelength, frequency, mode]);
+
+      // On transition from paused -> playing, adjust t0 so phase doesn't jump
+      React.useEffect(() => {
+        if (isPlaying) {
+          const now = performance.now()/1000;
+          // keep current frozen t, resume from there
+          timeRef.current.t0 = now - timeRef.current.t;
+        }
+      }, [isPlaying]);
+
+      // --- Canvas drawing ---
+      React.useEffect(() => {
+        const canvas = canvasRef.current;
+        const ctx = canvas?.getContext('2d');
+        if (!ctx || !canvas) return;
+
+        const { w, h, dpr } = dims;
+        canvas.width = Math.round(w * dpr);
+        canvas.height = Math.round(h * dpr);
+        canvas.style.width = `${w}px`;
+        canvas.style.height = `${h}px`;
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+        const midY = h * 0.55;
+
+        const drawGrid = () => {
+          ctx.strokeStyle = '#e5e7eb';
+          ctx.lineWidth = 1;
+          for (let x = 40; x < w - 40; x += 50) {
+            ctx.beginPath();
+            ctx.moveTo(x, 20);
+            ctx.lineTo(x, h - 20);
+            ctx.stroke();
+          }
+          // Equilibrium reference
+          ctx.strokeStyle = '#9ca3af';
+          ctx.setLineDash([6,6]);
+          ctx.beginPath();
+          ctx.moveTo(40, midY);
+          ctx.lineTo(w - 40, midY);
+          ctx.stroke();
+          ctx.setLineDash([]);
+        };
+
+        const drawWaveCurve = (t) => {
+          if (!showWaveform) return;
+          ctx.strokeStyle = '#111827';
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          if (mode === 'transverse') {
+            for (let x = 40; x <= w - 40; x += 2) {
+              const y = midY - amplitude * Math.sin(k * x - omega * t);
+              if (x === 40) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+            }
+          } else {
+            // Density/pressure indicator curve for longitudinal waves
+            const yCurve = midY - 0.7 * amplitude;
+            for (let x = 40; x <= w - 40; x += 2) {
+              const dens = amplitude * Math.sin(k * x - omega * t);
+              const y = yCurve - 0.5 * dens;
+              if (x === 40) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+            }
+          }
+          ctx.stroke();
+        };
+
+        const drawParticles = (t) => {
+          for (let i = 0; i < x0s.length; i++) {
+            const x0 = x0s[i];
+            let x = x0, y = midY;
+            if (mode === 'transverse') {
+              y = midY - amplitude * Math.sin(k * x0 - omega * t);
+            } else {
+              const disp = amplitude * Math.sin(k * x0 - omega * t);
+              x = x0 + disp; // oscillate parallel to direction of travel
+            }
+
+            // Trail for highlighted
+            if (showTrail && highlightIndex === i) {
+              trailRef.current.push({ x, y });
+              if (trailRef.current.length > 240) trailRef.current.shift();
+              ctx.strokeStyle = '#3b82f6';
+              ctx.beginPath();
+              trailRef.current.forEach((p, j) => j === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y));
+              ctx.stroke();
+            }
+
+            // Particle dot
+            ctx.beginPath();
+            ctx.fillStyle = (i === highlightIndex) ? '#ef4444' : '#1f2937';
+            ctx.arc(x, y, 4.5, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Guide to equilibrium for highlighted
+            if (i === highlightIndex) {
+              ctx.save();
+              ctx.setLineDash([4,4]);
+              ctx.strokeStyle = '#ef4444';
+              ctx.beginPath();
+              if (mode === 'transverse') { ctx.moveTo(x, midY); ctx.lineTo(x, y); }
+              else { ctx.moveTo(x0, y); ctx.lineTo(x, y); }
+              ctx.stroke();
+              ctx.restore();
+            }
+          }
+
+          if (mode === 'longitudinal') {
+            // Faint vertical bars hinting compressions/rarefactions
+            ctx.save();
+            ctx.globalAlpha = 0.08;
+            for (let x = 40; x <= w - 40; x += 6) {
+              const dens = Math.abs(Math.sin(k * x - omega * timeRef.current.t));
+              const barH = 120 * dens;
+              ctx.fillStyle = '#111827';
+              ctx.fillRect(x - 1, midY - barH/2, 2, barH);
+            }
+            ctx.restore();
+          }
+        };
+
+        const draw = () => {
+          ctx.clearRect(0, 0, w, h);
+          drawGrid();
+          drawWaveCurve(timeRef.current.t);
+          drawParticles(timeRef.current.t);
+        };
+
+        const tick = () => {
+          if (isPlaying) {
+            const tNow = performance.now() / 1000;
+            timeRef.current.t = tNow - timeRef.current.t0;
+          }
+          draw();
+          rafRef.current = requestAnimationFrame(tick);
+        };
+
+        // start loop and cleanup properly to avoid multiple RAFs
+        rafRef.current = requestAnimationFrame(tick);
+        return () => cancelAnimationFrame(rafRef.current);
+      }, [dims, amplitude, wavelength, frequency, showWaveform, isPlaying, x0s, highlightIndex, showTrail, k, omega, mode]);
+
+      // --- Click to pick nearest particle (mode aware) ---
+      React.useEffect(() => {
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+        const onClick = (e) => {
+          const rect = canvas.getBoundingClientRect();
+          const mx = e.clientX - rect.left;
+          const t = timeRef.current.t;
+          let bestI = 0; let bestD = Infinity;
+          for (let i = 0; i < x0s.length; i++) {
+            const x0 = x0s[i];
+            const shownX = mode === 'longitudinal' ? x0 + amplitude * Math.sin(k * x0 - omega * t) : x0;
+            const d = Math.abs(mx - shownX);
+            if (d < bestD) { bestD = d; bestI = i; }
+          }
+          setHighlightIndex(bestI);
+          trailRef.current = [];
+        };
+        canvas.addEventListener('click', onClick);
+        return () => canvas.removeEventListener('click', onClick);
+      }, [x0s, mode, amplitude, k, omega]);
+
+      // --- Expose a tiny test helper in console ---
+      React.useEffect(() => {
+        window.__WaveTest = {
+          pauseOnce: (ms = 300) => {
+            const t1 = timeRef.current.t;
+            setIsPlaying(false);
+            setTimeout(() => {
+              const t2 = timeRef.current.t;
+              const pass = Math.abs(t2 - t1) < 1e-3;
+              console.log(`[Pause Test] ${pass ? 'PASS' : 'FAIL'}: Δt=${(t2 - t1).toFixed(5)}s over ${ms}ms`);
+              setIsPlaying(true);
+            }, ms);
+          }
+        };
+      }, []);
+
+      // --- UI ---
+      return (
+        <div className="p-4 max-w-6xl mx-auto">
+          <h1 className="text-2xl font-semibold mb-2">Wave Simulator</h1>
+          <p className="text-sm text-gray-600 mb-3">
+            {mode === 'transverse' ? 'Transverse: particles oscillate perpendicular to travel.' : 'Longitudinal: particles oscillate parallel to travel; compressions/rarefactions shown.'}
+          </p>
+
+          <div ref={wrapperRef} className="rounded-xl border bg-white p-2 mb-4">
+            <canvas ref={canvasRef} className="w-full h-full cursor-crosshair" />
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-4 gap-4">
+            <div className="space-y-3 lg:col-span-3 grid grid-cols-1 md:grid-cols-4 gap-4">
+              <div>
+                <label className="block text-sm font-medium">Wave type</label>
+                <select value={mode} onChange={e => { setMode(e.target.value); trailRef.current = []; }} className="mt-1 w-full rounded-lg border p-2 text-sm">
+                  <option value="transverse">Transverse</option>
+                  <option value="longitudinal">Longitudinal</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm font-medium">Frequency: {frequency.toFixed(2)} Hz</label>
+                <input type="range" min="0" max="2" step="0.01" value={frequency} onChange={e => setFrequency(+e.target.value)} className="w-full" />
+              </div>
+              <div>
+                <label className="block text-sm font-medium">Amplitude: {amplitude}px</label>
+                <input type="range" min="10" max="120" step="1" value={amplitude} onChange={e => setAmplitude(+e.target.value)} className="w-full" />
+              </div>
+              <div>
+                <label className="block text-sm font-medium">Wavelength: {wavelength}px</label>
+                <input type="range" min="100" max="600" step="1" value={wavelength} onChange={e => setWavelength(+e.target.value)} className="w-full" />
+              </div>
+            </div>
+
+            <div className="space-y-3">
+              <div className="flex gap-2">
+                <button onClick={() => setIsPlaying(p => !p)} className="px-3 py-1.5 rounded-lg border text-sm hover:bg-gray-50">{isPlaying ? 'Pause' : 'Play'}</button>
+                <button onClick={() => { setAmplitude(60); setWavelength(300); setFrequency(0.5); setShowWaveform(true); setShowTrail(false); setMode('transverse'); }} className="px-3 py-1.5 rounded-lg border text-sm hover:bg-gray-50">Reset</button>
+              </div>
+              <div>
+                <label className="block text-sm font-medium">Highlight index</label>
+                <select value={highlightIndex ?? ''} onChange={e => { const v = e.target.value; setHighlightIndex(v === '' ? null : parseInt(v)); trailRef.current = []; }} className="mt-1 w-full rounded-lg border p-2 text-sm">
+                  <option value="">None</option>
+                  {x0s.map((_, i) => (
+                    <option key={i} value={i}>{i + 1}</option>
+                  ))}
+                </select>
+                <p className="text-xs text-gray-500 mt-1">Tip: You can also click the canvas.</p>
+              </div>
+              <div className="flex items-center gap-3 text-sm">
+                <label className="inline-flex items-center gap-2">
+                  <input type="checkbox" checked={showWaveform} onChange={e => setShowWaveform(e.target.checked)} /> Show wave curve
+                </label>
+              </div>
+              <div className="flex items-center gap-3 text-sm">
+                <label className="inline-flex items-center gap-2">
+                  <input type="checkbox" checked={showTrail} onChange={e => { trailRef.current = []; setShowTrail(e.target.checked); }} /> Trail for highlighted
+                </label>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // =============================
+    // Mount safely after DOM is ready (fixes createRoot timing issues)
+    // =============================
+    function mountApp() {
+      const mountEl = document.getElementById('root');
+      if (!mountEl || !window.React || !window.ReactDOM) {
+        return void setTimeout(mountApp, 30);
+      }
+      const root = ReactDOM.createRoot(mountEl);
+      root.render(<WaveSimulator />);
+
+      // ---- Minimal Self-Tests (console) ----
+      const tests = [];
+      tests.push({ name: 'Root element exists', pass: !!mountEl });
+      tests.push({ name: 'React loaded', pass: !!window.React });
+      tests.push({ name: 'ReactDOM loaded', pass: !!window.ReactDOM });
+      setTimeout(() => {
+        const canvas = document.querySelector('canvas');
+        tests.push({ name: 'Canvas rendered', pass: !!canvas });
+        console.group('[Wave Simulator] Self-tests');
+        for (const t of tests) console.log(`${t.pass ? '✅' : '❌'} ${t.name}`);
+        console.groupEnd();
+      }, 250);
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', mountApp);
+    } else {
+      mountApp();
+    }
+  </script>
+</body>
+</html>
